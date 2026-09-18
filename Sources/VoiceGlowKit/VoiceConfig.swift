@@ -49,6 +49,12 @@ public struct VoiceConfig: Sendable, Equatable {
     /// Resting distance between lobes.
     public var lobeSpacing: Double = 0.85
     /// The ceiling's tuned width multiplier — how wide the glow's mask sits.
+    /// How far a lobe's colour reaches before it fades out.
+    public var softness: Double = 1.07
+    /// Size of the hot core at the centre of the edge.
+    public var coreSize: Double = 1
+    /// Lobes follow the voice bands individually.
+    public var bands: Bool = true
     public var rangeWidth: Double = 0.75
     /// The ceiling's tuned height multiplier.
     public var rangeHeight: Double = 1

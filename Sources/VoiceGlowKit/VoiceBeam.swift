@@ -23,6 +23,10 @@ public struct VoiceBeam<Content: View>: View {
     private let level: Double
     private let bands: [Double]
 
+    /// When set, the view paints exactly this frame and runs no clock — for
+    /// previews, snapshot tests, and comparing against a reference.
+    private let fixedFrame: VoiceFrame?
+
     @State private var driver = VoiceDriver()
     @State private var frame = VoiceFrame()
     @State private var lastTick: Date?
@@ -42,9 +46,22 @@ public struct VoiceBeam<Content: View>: View {
         self.level = level
         self.bands = bands
         self.content = content()
+        self.fixedFrame = nil
         var resolved = config
         resolved.processing = processing
         self.config = resolved
+    }
+
+    /// Paint one exact frame, with no animation clock — settle a `VoiceDriver`
+    /// yourself and hand the result over.
+    public init(frame: VoiceFrame,
+                config: VoiceConfig = VoiceConfig(),
+                @ViewBuilder content: () -> Content) {
+        self.level = frame.level
+        self.bands = frame.bands
+        self.content = content()
+        self.fixedFrame = frame
+        self.config = config
     }
 
     public var body: some View {
@@ -56,11 +73,18 @@ public struct VoiceBeam<Content: View>: View {
     /// edge — the bloom spills outside without the view taking any extra space.
     private var glow: some View {
         GeometryReader { proxy in
-            TimelineView(.animation(paused: config.paused)) { timeline in
-                Canvas(opaque: false, colorMode: .extendedLinear, rendersAsynchronously: true) { ctx, size in
-                    draw(in: &ctx, size: size, frame: tick(at: timeline.date))
+            if let fixedFrame {
+                Canvas(opaque: false, colorMode: .extendedLinear) { ctx, size in
+                    draw(in: &ctx, size: size, frame: fixedFrame)
                 }
                 .frame(width: proxy.size.width, height: proxy.size.height)
+            } else {
+                TimelineView(.animation(paused: config.paused)) { timeline in
+                    Canvas(opaque: false, colorMode: .extendedLinear, rendersAsynchronously: true) { ctx, size in
+                        draw(in: &ctx, size: size, frame: tick(at: timeline.date))
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                }
             }
         }
         .allowsHitTesting(false)
@@ -97,100 +121,87 @@ public struct VoiceBeam<Content: View>: View {
     private func draw(in ctx: inout GraphicsContext, size: CGSize, frame f: VoiceFrame) {
         guard size.width > 0, size.height > 0 else { return }
 
-        let lit = VoiceMath.clamp01(f.level)
         let scale = config.scale
-        // Everything radiates from the middle of the bottom edge; while
-        // processing the beam slides along it.
+        let eff = VoiceMath.clamp01(f.level)
+
+        // Upstream's three multipliers. The lobe sizes in `VoiceGeometry` are
+        // radii to be scaled by these — not pixel sizes — which is what makes
+        // the glow span the whole host instead of sitting in a puddle.
+        let glow = 0.15 + 0.85 * eff
+        let hMul = 0.5 + config.reach * eff
+        let wMul = 0.85 + config.spread * eff
+
         let baseline = size.height
         let centre = size.width / 2 + CGFloat(f.sweep) * CGFloat(sweepReach())
 
-        // The ceiling: the ellipse every layer is masked to. It widens and
-        // rises with the level, and `bend` humps its top at the centre.
-        let ceilingW = VoiceGeometry.ceilingHalfWidth * config.rangeWidth * scale * (0.7 + 0.3 * lit)
-        let ceilingH = (VoiceGeometry.ceilingHeight * 0.62 * config.rangeHeight * config.reach * scale
-                        * (0.45 + 0.55 * lit)) + config.bend * 0.45 * scale * lit
+        // Everything lives inside the host's rounded rect — the glow is light
+        // behind the surface, not a halo hanging off it.
+        let hostShape = Path(roundedRect: CGRect(origin: .zero, size: size),
+                             cornerRadius: CGFloat(config.radius > 0 ? config.radius : Double(size.height) / 2),
+                             style: .continuous)
+        ctx.clip(to: hostShape)
 
-        // Bloom first (widest, softest), then the inner light, then the stroke.
-        // Each layer carries its own blur: the bloom is a haze, the stroke is
-        // the only near-sharp pass, and together they stay well under white.
-        let layers: [(spread: Double, height: Double, alpha: Double, blur: Double)] = [
-            (1.15, 1.50, config.theme == .dark ? 0.55 : 0.34, 16),
-            (0.90, 0.90, 0.38, 7),
-            (1.00, 1.00, 0.48, 2.0),
+        // Bloom (widest, softest) → inner light → stroke, exactly upstream's
+        // stack. `y` lifts the stroke pass slightly off the edge.
+        let layers: [(sw: Double, sh: Double, y: Double, alpha: Double, blur: Double)] = [
+            (1.15, 1.50, 0, config.theme == .dark ? 0.72 : 0.46, 32),
+            (0.90, 0.90, 0, 0.40, 18),
+            (1.00, 1.00, 2, 0.46, 11),
         ]
 
         ctx.drawLayer { layer in
+            layer.opacity = glow
             for spec in layers {
                 layer.drawLayer { pass in
                     pass.addFilter(.blur(radius: spec.blur * config.glowSize * scale))
-                    paintLobes(in: &pass, frame: f, lit: lit, centre: centre, baseline: baseline,
-                               widthScale: spec.spread, heightScale: spec.height, alpha: spec.alpha)
+                    paintLobes(in: &pass, frame: f, eff: eff, centre: centre, baseline: baseline,
+                               wMul: wMul, hMul: hMul, sw: spec.sw, sh: spec.sh,
+                               yOffset: spec.y, alpha: spec.alpha)
                 }
             }
-            paintCore(in: &layer, lit: lit, centre: centre, baseline: baseline)
-
-            // The soft ceiling mask: white at the edge, gone at the ellipse's
-            // rim, so nothing paints outside the hump.
-            let mask = CGRect(x: centre - CGFloat(ceilingW), y: baseline - CGFloat(ceilingH),
-                              width: CGFloat(ceilingW) * 2, height: CGFloat(ceilingH) * 2)
-            layer.fill(
-                Ellipse().path(in: mask),
-                with: .radialGradient(
-                    Gradient(stops: [
-                        .init(color: .white, location: 0),
-                        .init(color: .white.opacity(0.55), location: 0.35),
-                        .init(color: .white.opacity(0.12), location: 0.7),
-                        .init(color: .clear, location: 1),
-                    ]),
-                    center: CGPoint(x: mask.midX, y: mask.midY),
-                    startRadius: 0,
-                    endRadius: max(mask.width, mask.height) / 2
-                ),
-                style: FillStyle()
-            )
+            paintCore(in: &layer, eff: eff, wMul: wMul, hMul: hMul, centre: centre, baseline: baseline)
         }
 
-        drawBand(in: &ctx, size: size, frame: f, baseline: baseline, centre: centre, lit: lit)
+        drawBand(in: &ctx, size: size, frame: f, baseline: baseline, centre: centre, lit: eff,
+                 hMul: hMul, wMul: wMul)
     }
 
-    /// One pass of the seven lobes. Each slides along the ring by the flow
-    /// phase and fades out at the wrap edge, so colours cycle through the
-    /// centre instead of popping across.
-    private func paintLobes(in ctx: inout GraphicsContext, frame f: VoiceFrame, lit: Double,
+    /// One pass of the seven lobes. Each is a radial gradient anchored on the
+    /// bottom edge, its height lifted by the band it follows and faded out at
+    /// the wrap edge so colours cycle through the centre.
+    private func paintLobes(in ctx: inout GraphicsContext, frame f: VoiceFrame, eff: Double,
                             centre: CGFloat, baseline: CGFloat,
-                            widthScale: Double, heightScale: Double, alpha: Double) {
+                            wMul: Double, hMul: Double, sw: Double, sh: Double,
+                            yOffset: Double, alpha: Double) {
         let scale = config.scale
-        let span = VoiceGeometry.lobeSpan(config: config)
+        let span = VoiceGeometry.lobeSpan * config.lobeSpacing
+        // Where the gradient reaches full transparency, as a share of its
+        // radius — upstream's `softness`.
+        let fade = min(0.95, max(0.4, 0.70 * config.softness))
 
         for (index, lobe) in VoiceGeometry.lobes.enumerated() {
-            let resting = lobe.x * config.spread * scale
-            let offset = VoiceMath.wrapX(resting + f.flowOffset, span: span)
-            let envelope = VoiceMath.edgeEnvelope(offset, span: span)
-            guard envelope > 0.001 else { continue }
+            let x = VoiceMath.wrapX(lobe.x * config.lobeSpacing + f.flowOffset, span: span)
+            let band = f.bands.indices.contains(lobe.band) ? f.bands[lobe.band] : eff
+            // The band a lobe follows lifts it between 0.6x and 1.3x of the
+            // shared height; the envelope fades it toward the wrap.
+            let lift = (config.bands ? 0.6 + 0.7 * band : 1) * VoiceMath.edgeEnvelope(x, span: span)
+            guard lift > 0.001 else { continue }
 
-            // Each lobe rides its own voice band, so a voice ripples outward.
-            let band = f.bands.indices.contains(lobe.band) ? f.bands[lobe.band] : lit
-            let drive = 0.45 + 0.55 * VoiceMath.clamp01(0.5 * lit + 0.5 * band)
+            let rx = lobe.w * sw * wMul * scale
+            let ry = lobe.h * sh * hMul * lift * scale
+            let cx = centre + CGFloat(x * wMul * scale)
+            let cy = baseline + CGFloat(yOffset * scale)
 
-            let w = lobe.w * widthScale * config.spread * scale * drive
-            let h = lobe.h * heightScale * config.reach * scale * drive
-                + config.bend * scale * lit * (index == 0 ? 0.5 : 0.2)
-
-            let rect = CGRect(x: centre + CGFloat(offset) - CGFloat(w),
-                              y: baseline - CGFloat(h),
-                              width: CGFloat(w) * 2,
-                              height: CGFloat(h) * 2)
-
+            let rect = CGRect(x: cx - CGFloat(rx), y: cy - CGFloat(ry),
+                              width: CGFloat(rx) * 2, height: CGFloat(ry) * 2)
             let color = hueShifted(config.colors[index % config.colors.count], by: f.hue)
-            let strength = alpha * envelope * (0.2 + 0.8 * lit)
 
             ctx.fill(
                 Ellipse().path(in: rect),
                 with: .radialGradient(
                     Gradient(stops: [
-                        .init(color: color.opacity(strength), location: 0),
-                        .init(color: color.opacity(strength * 0.45), location: 0.4),
-                        .init(color: .clear, location: 1),
+                        .init(color: color.opacity(alpha), location: 0),
+                        .init(color: .clear, location: fade),
                     ]),
                     center: CGPoint(x: rect.midX, y: rect.midY),
                     startRadius: 0,
@@ -202,23 +213,22 @@ public struct VoiceBeam<Content: View>: View {
 
     /// The hot core at the centre of the edge — the light source the colours
     /// fan out from. Black on a light theme, so the edge still reads.
-    private func paintCore(in ctx: inout GraphicsContext, lit: Double,
+    private func paintCore(in ctx: inout GraphicsContext, eff: Double, wMul: Double, hMul: Double,
                            centre: CGFloat, baseline: CGFloat) {
         let scale = config.scale
-        let w = 30 * scale * (0.6 + 0.4 * lit)
-        let h = 30 * scale * config.reach * (0.5 + 0.5 * lit)
-        let rect = CGRect(x: centre - CGFloat(w), y: baseline - CGFloat(h),
-                          width: CGFloat(w) * 2, height: CGFloat(h) * 2)
+        let rx = 30 * config.coreSize * wMul * scale
+        let ry = 30 * config.coreSize * hMul * scale
+        let rect = CGRect(x: centre - CGFloat(rx), y: baseline - CGFloat(ry),
+                          width: CGFloat(rx) * 2, height: CGFloat(ry) * 2)
         let base: Color = config.theme == .dark ? .white : .black
-        let peak = config.theme == .dark ? 0.20 : 0.28
-        let drive = lit * lit   // quadratic: a glint at full voice, nothing at rest
+        let peak = config.theme == .dark ? 0.16 : 0.24
 
         ctx.fill(
             Ellipse().path(in: rect),
             with: .radialGradient(
                 Gradient(stops: [
-                    .init(color: base.opacity(peak * drive), location: 0),
-                    .init(color: base.opacity(0.06 * drive), location: 0.3),
+                    .init(color: base.opacity(peak * eff), location: 0),
+                    .init(color: base.opacity((config.theme == .dark ? 0.05 : 0.09) * eff), location: 0.3),
                     .init(color: .clear, location: 0.65),
                 ]),
                 center: CGPoint(x: rect.midX, y: rect.midY),
@@ -228,25 +238,24 @@ public struct VoiceBeam<Content: View>: View {
         )
     }
 
-    /// The bright line that traces the ceiling's hump: a normalised bell,
-    /// lifted at the corners by the tail, sampled across the width.
+    /// The rim that traces the ceiling's hump. It fades in with the bend, so
+    /// at rest there is no line at all.
     private func drawBand(in ctx: inout GraphicsContext, size: CGSize, frame f: VoiceFrame,
-                          baseline: CGFloat, centre: CGFloat, lit: Double) {
-        guard config.bandStrength > 0 else { return }
+                          baseline: CGFloat, centre: CGFloat, lit: Double,
+                          hMul: Double, wMul: Double) {
+        // Upstream gates the rim on the bend: flat at silence, so nothing is
+        // drawn until the voice actually lifts the ceiling.
+        let bendA = config.bend > 0 ? min(1, (config.bend * lit) / config.bend) : 0
+        let strength = config.bandStrength * bendA * lit
+        guard strength > 0.01 else { return }
 
         let scale = config.scale
         let halfWidth = Double(size.width) / 2 + config.bandTailOverflow
-        // The hump rides the ceiling, capped so the line always stays in the
-        // bottom third of the host — it traces the glow, it doesn't cross the
-        // content.
-        let ceiling = VoiceGeometry.ceilingHeight * 0.62 * config.rangeHeight * config.reach * scale
-            * (0.45 + 0.55 * lit) + config.bend * 0.45 * scale * lit
-        let peak = min(ceiling * config.bandPosition, Double(size.height) * 0.34)
-        let offset = config.bandOffset * scale * 0.12
-        // The bell is measured against the ceiling's own width, not the host's,
-        // so a wide composer gets a centred hump instead of one long swell.
+        let ceiling = VoiceGeometry.ceilingHeight * config.rangeHeight * hMul * scale * 0.5
+            + config.bend * scale * lit
+        let peak = min(ceiling * config.bandPosition, Double(size.height) * 0.42)
         let bellHalfWidth = max(1, VoiceGeometry.ceilingHalfWidth * config.rangeWidth
-                                * config.bandWidth * 0.5 * config.spread * scale)
+                                * config.bandWidth * 0.5 * wMul * scale)
 
         var path = Path()
         for i in 0...VoiceGeometry.bandSamples {
@@ -257,28 +266,24 @@ public struct VoiceBeam<Content: View>: View {
                                           position: config.bandTailPosition,
                                           curve: config.bandTailCurve)
             let point = CGPoint(x: centre + CGFloat(x),
-                                y: baseline + CGFloat(offset) - CGFloat(peak * (bell + tail)))
+                                y: baseline - CGFloat(peak * (bell + tail)))
             if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
         }
 
-        let strength = VoiceMath.clamp01(config.bandStrength * (0.15 + 0.85 * lit))
         let core = hueShifted(config.bandColors.core, by: f.hue)
-
-        // Chromatic split: the fringes ride just above and below the core.
         if config.bandAberration > 0 {
             let split = CGFloat(config.bandAberration * scale)
             for (color, dy) in [(config.bandColors.above, -split),
                                 (config.bandColors.mid, 0),
                                 (config.bandColors.below, split)] {
                 ctx.stroke(path.offsetBy(dx: 0, dy: dy),
-                           with: .color(hueShifted(color, by: f.hue).opacity(0.30 * strength)),
-                           style: StrokeStyle(lineWidth: 1.6 * CGFloat(scale), lineCap: .round))
+                           with: .color(hueShifted(color, by: f.hue).opacity(0.05 * strength)),
+                           style: StrokeStyle(lineWidth: 1.4 * CGFloat(scale), lineCap: .round))
             }
         }
-
         ctx.stroke(path,
-                   with: .color(core.opacity(0.85 * strength)),
-                   style: StrokeStyle(lineWidth: 1.0 * CGFloat(scale), lineCap: .round))
+                   with: .color(core.opacity(0.10 * strength)),
+                   style: StrokeStyle(lineWidth: 0.9 * CGFloat(scale), lineCap: .round))
     }
 
     /// How far the travelling beam runs to each side.
