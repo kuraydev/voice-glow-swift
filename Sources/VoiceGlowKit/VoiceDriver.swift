@@ -110,18 +110,45 @@ public struct VoiceDriver: Sendable {
     }
 }
 
-/// Geometry shared by the driver and the renderer.
+/// Geometry shared by the driver and the renderer, from upstream's `styles.ts`.
 public enum VoiceGeometry {
-    /// Ceiling geometry the glow is masked to (px at scale 1), from upstream.
+    /// One lobe of the beam: a resting offset from centre, its size, and which
+    /// voice band drives it.
+    public struct Lobe: Sendable, Equatable {
+        public let x: Double
+        public let w: Double
+        public let h: Double
+        public let band: Int
+    }
+
+    /// Seven lobes: the centre rides the low band, its neighbours the mids, the
+    /// outer pair the highs and the far pair the mids again, so a voice makes
+    /// the colours ripple outward instead of one blob pumping.
+    public static let lobes: [Lobe] = [
+        Lobe(x: 0, w: 74, h: 46, band: 0),
+        Lobe(x: -36, w: 54, h: 40, band: 1),
+        Lobe(x: 36, w: 54, h: 40, band: 1),
+        Lobe(x: -72, w: 48, h: 32, band: 2),
+        Lobe(x: 72, w: 48, h: 32, band: 2),
+        Lobe(x: -108, w: 42, h: 26, band: 1),
+        Lobe(x: 108, w: 42, h: 26, band: 1),
+    ]
+
+    /// Resting distance between neighbouring lobes, px.
+    public static let lobeSpacing: Double = 36
+    /// Width of the ring the lobes travel around — one full turn of the flow.
+    public static let lobeSpan: Double = lobeSpacing * Double(lobes.count)
+
+    /// The ceiling every layer is masked to (px at scale 1): an ellipse on the
+    /// bottom edge that the glow lives inside.
     public static let ceilingHalfWidth: Double = 170
     public static let ceilingHeight: Double = 64
     /// Samples along the band line.
     public static let bandSamples: Int = 56
-    /// Resting distance between lobes at scale 1.
-    public static let lobeSpacing: Double = 120
 
-    /// The lobe ring's span — the distance a lobe travels before it wraps.
+    /// The lobe ring's span for a config — the distance a lobe travels before
+    /// it wraps.
     public static func lobeSpan(config: VoiceConfig) -> Double {
-        max(1, lobeSpacing * config.lobeSpacing * config.spread * config.scale)
+        max(1, lobeSpan * config.spread * config.scale)
     }
 }

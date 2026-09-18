@@ -48,6 +48,10 @@ public struct VoiceConfig: Sendable, Equatable {
     public var glowSize: Double = 1
     /// Resting distance between lobes.
     public var lobeSpacing: Double = 0.85
+    /// The ceiling's tuned width multiplier — how wide the glow's mask sits.
+    public var rangeWidth: Double = 0.75
+    /// The ceiling's tuned height multiplier.
+    public var rangeHeight: Double = 1
 
     // ── the band (the bright line riding the edge) ──────────────────────────
     public var bandStrength: Double = 1.55
@@ -132,6 +136,7 @@ public struct VoiceConfig: Sendable, Equatable {
             bandOffset = -16; bandTail = 0
             processingTravel = 2; cornerFollow = 0
             lobeSpacing = 0.45
+            rangeWidth = 0.8; rangeHeight = 0.7
         case .mobile:
             scale = 1.25
             spread = 0.45; reach = 3
@@ -145,18 +150,26 @@ public struct VoiceConfig: Sendable, Equatable {
         }
     }
 
+    /// Seven colours, one per lobe (centre first, then pairs outward).
     public static let darkPalette: [Color] = [
-        Color(red: 1.00, green: 0.42, blue: 0.21),
-        Color(red: 1.00, green: 0.23, blue: 0.53),
-        Color(red: 0.61, green: 0.35, blue: 1.00),
-        Color(red: 0.23, green: 0.62, blue: 1.00),
+        Color(red: 1.00, green: 0.27, blue: 0.47),   // pink
+        Color(red: 0.24, green: 0.75, blue: 1.00),   // sky
+        Color(red: 0.69, green: 0.27, blue: 1.00),   // purple
+        Color(red: 0.24, green: 0.86, blue: 0.51),   // green
+        Color(red: 1.00, green: 0.59, blue: 0.16),   // orange
+        Color(red: 0.35, green: 0.39, blue: 1.00),   // indigo
+        Color(red: 0.16, green: 0.78, blue: 0.75),   // teal
     ]
 
+    /// Deeper values, because on a white surface they sit at far lower opacity.
     public static let lightPalette: [Color] = [
-        Color(red: 1.00, green: 0.52, blue: 0.29),
-        Color(red: 1.00, green: 0.33, blue: 0.58),
-        Color(red: 0.67, green: 0.44, blue: 1.00),
-        Color(red: 0.31, green: 0.67, blue: 1.00),
+        Color(red: 1.00, green: 0.79, blue: 0.08),   // gold
+        Color(red: 0.49, green: 0.77, blue: 1.00),   // sky
+        Color(red: 0.71, green: 0.16, blue: 0.90),   // violet
+        Color(red: 0.92, green: 0.39, blue: 0.63),   // rose
+        Color(red: 1.00, green: 0.69, blue: 0.48),   // peach
+        Color(red: 0.60, green: 0.63, blue: 1.00),   // periwinkle
+        Color(red: 0.50, green: 0.85, blue: 0.93),   // aqua
     ]
 }
 
